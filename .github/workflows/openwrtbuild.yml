@@ -1,0 +1,230 @@
+#=================================================
+# https://github.com/P3TERX/Actions-OpenWrt
+# Description: Build OpenWrt using GitHub Actions
+# Lisence: MIT
+# Author: P3TERX
+# Blog: https://p3terx.com
+#=================================================
+
+name: Build OpenWrt
+
+on:
+  workflow_dispatch:
+
+env:
+  REPO_TOKEN: ${{ secrets.REPO_TOKEN }}
+  SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: Ubuntu-22.04
+    
+    name: Build N1
+    strategy:
+      fail-fast: false
+        
+    steps:
+    - name: Checkout
+      uses: actions/checkout@main
+      with:
+          fetch-depth: 0
+
+    # - name: Set up secret file
+      # run: |
+        # echo ${{ secrets.TELEGRAM_CHAT_ID }} | sed 's/./& /g'
+        # echo ${{ secrets.TELEGRAM_TOKEN }} | sed 's/./& /g'
+
+    - name: Load Settings.ini
+      run: |
+        echo armvirt_64
+        source "${GITHUB_WORKSPACE}/devices/common/settings.ini"
+        if [ -f "devices/armvirt_64/settings.ini" ]; then
+          source "${GITHUB_WORKSPACE}/devices/armvirt_64/settings.ini"
+        fi
+        echo "REPO_URL=${REPO_URL}" >> $GITHUB_ENV
+        echo "REPO_BRANCH=${REPO_BRANCH}" >> $GITHUB_ENV
+        echo "CONFIG_FILE=${CONFIG_FILE}" >> $GITHUB_ENV
+        echo "DIY_SH=${DIY_SH}" >> $GITHUB_ENV
+        echo "FREE_UP_DISK=${FREE_UP_DISK}" >> $GITHUB_ENV
+        echo "UPLOAD_BIN_DIR_FOR_ARTIFACT=${UPLOAD_BIN_DIR_FOR_ARTIFACT}" >> $GITHUB_ENV
+        echo "UPLOAD_FIRMWARE_FOR_ARTIFACT=${UPLOAD_FIRMWARE_FOR_ARTIFACT}" >> $GITHUB_ENV
+        echo "UPLOAD_FIRMWARE_FOR_RELEASE=${UPLOAD_FIRMWARE_FOR_RELEASE}" >> $GITHUB_ENV
+        echo "UPLOAD_FIRMWARE_TO_COWTRANSFER=${UPLOAD_FIRMWARE_TO_COWTRANSFER}" >> $GITHUB_ENV
+        echo "UPLOAD_FIRMWARE_TO_WETRANSFER=${UPLOAD_FIRMWARE_TO_WETRANSFER}" >> $GITHUB_ENV
+        sed -i "1a REPO_TOKEN=${{ secrets.REPO_TOKEN }}" ${GITHUB_WORKSPACE}/devices/common/diy.sh
+        sed -i "1a TARGET=armvirt_64" ${GITHUB_WORKSPACE}/devices/common/diy.sh
+        echo "MTARGET=aarch64_cortex-a53" >> $GITHUB_ENV
+    - name: Trigger Packages Update
+      continue-on-error: true
+      run: |
+        gitdate=$(curl -s "https://api.github.com/repos/kiddin9/openwrt-packages/actions/runs" | jq -r '.workflow_runs[0].created_at')
+        gitdate=$(date -d "$gitdate" +%s)
+        now=$(date -d "$(date)" +%s)
+        if [[ $(expr $gitdate + 300) < $now ]]; then
+          curl -X POST https://api.github.com/repos/kiddin9/openwrt-packages/dispatches \
+            -H "Accept: application/vnd.github.everest-preview+json" \
+            -H "Authorization: token ${{ secrets.REPO_TOKEN }}" \
+          --data '{"event_type": "update"}'
+        fi
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        ( sudo -E apt-get -qq update
+        sudo -E apt-get -qq install build-essential clang flex g++ gawk gcc-multilib gettext \
+        git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev swig libpython3-dev aria2 jq subversion qemu-utils ccache rename libelf-dev device-tree-compiler
+        sudo -E apt-get -qq purge azure-cli ghc* zulu* llvm* firefox powershell openjdk* dotnet* google* mysql* php* android*
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean ) &
+        sudo timedatectl set-timezone "$TZ"
+        git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git config --global user.name "github-actions[bot]"
+    
+    - name: Get current date
+      id: date
+      run: |
+        echo "date=$(date +'%m/%d_%Y_%H/%M')" >> $GITHUB_ENV
+        echo "date2=$(date +'%m/%d %Y')" >> $GITHUB_ENV
+        VERSION="$(echo "${{github.event.action}}" | grep -Eo " [0-9.]+" | sed -e 's/ //')" || true
+        [ "$VERSION" ] && echo "VERSION=$VERSION" >> $GITHUB_ENV || echo "VERSION=$(date +'%m.%d')" >> $GITHUB_ENV
+    - name: Clone source code
+      run: |
+        if [ "armvirt_64" == "ipq807x_ipq60xx" ]; then
+            git clone https://github.com/gl-inet/gl-infra-builder.git
+            cd gl-infra-builder
+            python3 setup.py -c configs/config-wlan-ap.yml
+            ln -sf gl-infra-builder/wlan-ap/openwrt ../openwrt
+            cd -
+        elif [ "armvirt_64" == "mediatek_gl_mt7981" ]; then
+            git clone https://github.com/gl-inet/gl-infra-builder.git
+            cd gl-infra-builder
+            python3 setup.py -c configs/config-mt798x-7.6.6.1.yml
+            ln -sf gl-infra-builder/mt7981 ../openwrt
+            cd -
+        elif [ ! "${{ env.REPO_BRANCH }}" ]; then
+          REPO_BRANCH="$((curl -gs -H 'Content-Type: application/json' \
+           -H "Authorization: Bearer ${{ secrets.REPO_TOKEN }}" \
+           -X POST -d '{ "query": "query {repository(owner: \"openwrt\", name: \"openwrt\") {refs(refPrefix: \"refs/tags/\", last: 4, orderBy: {field: TAG_COMMIT_DATE, direction: ASC}) {edges {node {name}}}}}"}' https://api.github.com/graphql) | jq -r '.data.repository.refs.edges[].node.name' | grep v22 | tail -n 1)"
+           git clone $REPO_URL -b $REPO_BRANCH openwrt
+        else
+            git clone $REPO_URL -b ${{ env.REPO_BRANCH }} openwrt
+            echo "git clone $REPO_URL -b ${{ env.REPO_BRANCH }} openwrt"
+        fi
+    
+    - name: Free up disk space
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo mkdir -p -m 777 /mnt/openwrt/dl /mnt/openwrt/bin /mnt/openwrt/staging_dir
+        ln -sf /mnt/openwrt/dl openwrt/dl
+        ln -sf /mnt/openwrt/bin openwrt/bin
+        ln -sf /mnt/openwrt/staging_dir openwrt/staging_dir
+        
+    - name: Load custom configuration
+      run: |
+        cp -rf devices/common/. openwrt/
+        cp -rf devices/armvirt_64/. openwrt/
+        cp -rf devices openwrt/
+        cd openwrt
+        chmod +x devices/common/$DIY_SH
+        /bin/bash "devices/common/$DIY_SH"
+        if [ -f "devices/armvirt_64/$DIY_SH" ]; then
+          chmod +x devices/armvirt_64/$DIY_SH
+          echo "/bin/bash devices/armvirt_64/$DIY_SH"
+          /bin/bash "devices/armvirt_64/$DIY_SH"
+        fi
+        cp -Rf ./diy/* ./ || true
+        if [ -f "devices/armvirt_64/default-settings" ]; then
+          echo >> package/*/*/my-default-settings/files/etc/uci-defaults/99-default-settings
+          cat devices/armvirt_64/default-settings >> package/*/*/my-default-settings/files/etc/uci-defaults/99-default-settings
+        fi
+        cp -f devices/common/$CONFIG_FILE .config
+        if [ -f "devices/armvirt_64/$CONFIG_FILE" ]; then
+          echo >> .config
+          cat devices/armvirt_64/$CONFIG_FILE >> .config
+        fi
+        
+    - name: Apply patches
+      run: |
+        cd openwrt
+        find "devices/common/patches" -type f ! -name 'china_mirrors.patch' -name '*.patch' -print0 | sort -z | xargs -I % -t -0 -n 1 sh -c "cat '%'  | patch -d './' -B --merge -p1 -E --forward"
+        #git apply devices/common/patches/*.patch
+        if [ -n "$(ls -A "devices/armvirt_64/patches" 2>/dev/null)" ]; then
+          find "devices/armvirt_64/patches" -maxdepth 1 -type f -name '*.patch' -print0 | sort -z | xargs -I % -t -0 -n 1 sh -c "cat '%'  | patch -d './' -B --merge -p1 -E --forward"
+          #git apply devices/armvirt_64/patches/*.patch
+        fi
+        sed -i '$a  \
+        CONFIG_CPU_FREQ_GOV_POWERSAVE=y \
+        CONFIG_CPU_FREQ_GOV_USERSPACE=y \
+        CONFIG_CPU_FREQ_GOV_ONDEMAND=y \
+        CONFIG_CPU_FREQ_GOV_CONSERVATIVE=y \
+        CONFIG_CRYPTO_CHACHA20_NEON=y \
+        CONFIG_CRYPTO_CHACHA20POLY1305=y \
+        CONFIG_FAT_DEFAULT_IOCHARSET="utf8" \
+        ' `find target/linux -path "target/linux/*/config-*"`
+        
+
+    - name: Defconfig
+      run: |
+        cd openwrt
+        make defconfig
+        cat .config
+        
+    - name: Download package
+      id: package
+      run: |
+        cd openwrt
+        make download -j$(($(nproc)+1)) &
+        sleep 5
+        
+    - name: Cache
+      uses: stupidloud/cachewrtbuild@main
+      with:
+        ccache: 'true'
+        clean: ${{ contains(github.event.action, 'nocache') }}
+        prefix: ${{ github.workspace }}/openwrt
+    
+    - name: Check space usage
+      run: |
+        shopt -s extglob
+        rm -rf openwrt/staging_dir/!(*${{ env.MTARGET }}*|host|hostpkg) openwrt/build_dir/!(*${{ env.MTARGET }}*|host|hostpkg)
+        df -hT
+    - name: SSH connection to Actions
+      uses: kiddin9/debugger-action@master
+      if: contains(github.event.action, 'ssh')
+
+    - name: Compile the firmware
+      id: compile
+      run: |
+        shopt -s extglob
+        cd openwrt
+        echo -e "$(($(nproc)+1)) thread compile"
+        make -j$(($(nproc)+1)) || make -j1 V=s || (curl -k --data chat_id="${{ env.TELEGRAM_CHAT_ID }}" --data "text=❌ OpenWrt ${{ env.VERSION }} armvirt_64 编译失败 😂" "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendMessage";exit 1)
+        sed -i "s/# CONFIG_IB is not set/CONFIG_IB=y/" .config
+        rm -rf staging_dir/toolchain-*/bin/*openwrt-linux-musl-lto-dump
+        rm -rf staging_dir/toolchain-*/initial
+        
+    - name: Build OpenWrt firmware
+      uses: ophub/flippy-openwrt-actions@main
+      env:
+        OPENWRT_ARMVIRT: openwrt/bin/targets/*/*/*.tar.gz
+        PACKAGE_SOC: s905d
+        KERNEL_VERSION_NAME: 5.15.95
+        GH_TOKEN: ${{ secrets.GH_TOKEN }}
+         
+
+    - name: Upload OpenWrt Firmware to Release
+      uses: ncipollo/release-action@v1
+      with:
+         tag: openwrt_armvirt_v8_${{ env.PACKAGED_OUTPUTDATE }}
+         artifacts: ${{ env.PACKAGED_OUTPUTPATH }}/*
+         allowUpdates: true
+         token: ${{ secrets.GH_TOKEN }}
+         body: |
+           This is OpenWrt firmware for Armvirt 64
+           * Firmware information
+           Default IP: 192.168.1.2
+           Default username: root
+           Default password: password
