@@ -32,8 +32,8 @@ done
 
 mv -f feeds/kiddin9/r81* tmp/
 
-sed -i "s/192.168.1.1/192.168.1.3/" package/feeds/kiddin9/base-files/files/bin/config_generate
-sed -i "s/192.168.1.1/192.168.1.3/" package/base-files/files/bin/config_generate
+sed -i "s/192.168.1.1/192.168.1.2/" package/feeds/kiddin9/base-files/files/bin/config_generate
+sed -i "s/192.168.1.1/192.168.1.2/" package/base-files/files/bin/config_generate
 
 (
 svn co https://github.com/coolsnowwolf/lede/trunk/target/linux/generic/hack-5.10 target/linux/generic/hack-5.10
